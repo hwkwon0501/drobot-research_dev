@@ -63,8 +63,9 @@ constexpr unsigned char kCostFree = 0;
 constexpr unsigned char kCostFlyOver = 200;
 
 // fly_over 등급의 대표 높이.
-//   기본 0.60m — flight_clearance(0.8) 만으로도 최소여유(0.2)를 겨우 만족한다.
-//   0.90m 는 0.8 로는 부족해서 더 높은 고도를 골라야만 넘을 수 있다.
+//   기본 0.60m — 평지용 고도 0.8m 로는 원하는 여유(flight_clearance 0.8)가 안 돼
+//   0.6+0.8=1.4m 를 골라야 한다.
+//   0.90m 는 0.9+0.8=1.7m 를 골라야만 넘을 수 있다.
 //   두 경우를 모두 시험해야 '고도 선택'이 실제로 동작하는지 알 수 있다.
 constexpr double kHDefault = 0.60;
 constexpr double kHTall = 0.90;
@@ -344,6 +345,45 @@ TEST_F(StateSpaceTest, ChoosesHigherAltitudeWhenLowestIsNotEnough)
     seen.begin(), seen.end(),
     [](const auto & k) {return std::get<0>(k) > kWallX;});
   EXPECT_TRUE(crossed) << "높은 고도를 골라서라도 넘어야 한다";
+}
+
+
+// ---------------------------------------------------------------------------
+// 회귀 방지 — 장애물을 '뚫고' 나는 고도를 고르면 안 된다
+//
+// 예전 airOkAt 은 min_flight_clearance(0.2) 만 봤다. 그래서 0.8m 고도가
+// 0.6m 장애물 위에서 통과됐고, A* 는 이착륙 비용이 싼 가장 낮은 고도를 골랐다.
+// planner_server 재현에서 실제 높이 1.0m 박스를 0.8m 로 지나가는 경로가 나왔다.
+// ---------------------------------------------------------------------------
+TEST_F(StateSpaceTest, LowestLevelIsRejectedOverObstacleWhenClearanceAllows)
+{
+  const ProblemSpec spec = makeSpec(Modal::Hybrid);   // 0.60m 장애물
+  ASSERT_EQ(spec.airLevels().size(), 2u);
+  EXPECT_NEAR(spec.levelZ(0), 0.80, 1e-9);
+  // 0.80 >= 0.60 + 0.2 이지만, 천장이 허락하는 한 0.8m 여유를 지켜야 한다
+  EXPECT_FALSE(spec.airOkAt(kWallX, kMidY, 0));
+  EXPECT_TRUE(spec.airOkAt(kWallX, kMidY, 1));       // 1.40m
+  EXPECT_TRUE(spec.airOkAt(1, kMidY, 0));            // 평지 위는 0.8m 로 충분
+}
+
+TEST_F(StateSpaceTest, TallObstacleUsesCeilingLimitedAltitude)
+{
+  // 1.0m 박스: 1.0+0.8=1.8m 는 z_max(1.75)를 넘는다.
+  // 예전에는 h_limit = z_max - flight_clearance = 0.95m 라 후보에서 빠졌다.
+  // 이제는 z_max 로 깎고 최소 여유(0.2)만 지키면 넘을 수 있다.
+  setObstacleHeight(1.0);
+  const ProblemSpec spec = makeSpec(Modal::Hybrid);
+  ASSERT_EQ(spec.airLevels().size(), 2u);
+  EXPECT_NEAR(spec.levelZ(1), 1.75, 1e-9);
+  EXPECT_FALSE(spec.airOkAt(kWallX, kMidY, 0)) << "0.8m 로 1.0m 박스를 뚫고 지나간다";
+  EXPECT_TRUE(spec.airOkAt(kWallX, kMidY, 1));
+
+  // 천장 아래에서 최소 여유도 못 지키는 높이(1.6m)는 넘을 수 없다
+  setObstacleHeight(1.6);
+  const ProblemSpec spec2 = makeSpec(Modal::Hybrid);
+  for (size_t lv = 0; lv < spec2.airLevels().size(); ++lv) {
+    EXPECT_FALSE(spec2.airOkAt(kWallX, kMidY, static_cast<uint8_t>(lv)));
+  }
 }
 
 

@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 #include <nav2_costmap_2d/cost_values.hpp>
 #include <nav2_costmap_2d/costmap_math.hpp>
@@ -241,7 +242,7 @@ void ElevationLayer::pointCloudCallback(sensor_msgs::msg::PointCloud2::ConstShar
     unsigned int mx, my;
     if (!worldToMap(x, y, mx, my)) {continue;}
 
-    cells_[cellIndex(mx, my)].add(z);
+    cells_[cellIndex(mx, my)].addCloud(static_cast<float>(z));
 
     if (!any) {
       lo_x = hi_x = x;
@@ -289,6 +290,9 @@ void ElevationLayer::laserScanCallback(sensor_msgs::msg::LaserScan::ConstSharedP
 
   std::lock_guard<std::mutex> lock(data_mutex_);
 
+  bool any = false;
+  double lo_x = 0, lo_y = 0, hi_x = 0, hi_y = 0;
+
   double angle = msg->angle_min;
   for (size_t i = 0; i < msg->ranges.size(); ++i, angle += msg->angle_increment) {
     const float r = msg->ranges[i];
@@ -306,8 +310,33 @@ void ElevationLayer::laserScanCallback(sensor_msgs::msg::LaserScan::ConstSharedP
     // LiDAR가 본 지점은 최소한 rover_traversable_max 를 넘는 장애물이다.
     // 보수적으로 그 경계값을 넣는다.
     cells_[cellIndex(mx, my)].add(static_cast<float>(rover_traversable_max_ + 0.01));
+
+    if (!any) {
+      lo_x = hi_x = x;
+      lo_y = hi_y = y;
+      any = true;
+    } else {
+      lo_x = std::min(lo_x, x);
+      hi_x = std::max(hi_x, x);
+      lo_y = std::min(lo_y, y);
+      hi_y = std::max(hi_y, y);
+    }
   }
-  has_dirty_ = true;
+
+  // 갱신 영역을 실제 스캔 범위로 넓힌다. 예전에는 has_dirty_ 만 세우고
+  // 범위는 건드리지 않아, 직전 포인트클라우드 범위(또는 0,0)만 갱신됐다.
+  if (any) {
+    if (!has_dirty_) {
+      dirty_min_x_ = lo_x; dirty_max_x_ = hi_x;
+      dirty_min_y_ = lo_y; dirty_max_y_ = hi_y;
+      has_dirty_ = true;
+    } else {
+      dirty_min_x_ = std::min(dirty_min_x_, lo_x);
+      dirty_max_x_ = std::max(dirty_max_x_, hi_x);
+      dirty_min_y_ = std::min(dirty_min_y_, lo_y);
+      dirty_max_y_ = std::max(dirty_max_y_, hi_y);
+    }
+  }
 }
 
 
@@ -482,6 +511,23 @@ void ElevationLayer::updateCosts(
 
   if (publish_elevation_ && elevation_pub_) {
     publishElevationGrid();
+  }
+}
+
+
+void ElevationLayer::snapshotTerrain(
+  std::vector<float> & height, std::vector<unsigned char> & cls) const
+{
+  std::lock_guard<std::mutex> lock(data_mutex_);
+  const size_t n = cells_.size();
+  height.assign(n, std::numeric_limits<float>::quiet_NaN());
+  cls.assign(n, NO_INFORMATION);
+  for (size_t k = 0; k < n; ++k) {
+    const auto & c = cells_[k];
+    if (!c.observed) {continue;}
+    if (c.has_cloud) {height[k] = c.cloud_max_z;}
+    // updateCosts 에서 이 레이어 자체 맵(costmap_)에 기록해 둔 분류 결과
+    cls[k] = costmap_[k];
   }
 }
 

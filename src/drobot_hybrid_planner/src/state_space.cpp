@@ -66,8 +66,10 @@ ProblemSpec::ProblemSpec(
 {
   z_max_ = model_->maxFlightAltitude(params_.ceiling_height);
 
-  // 3D: 고도가 h + flight_clearance 로 고정이므로 h + clearance <= z_max
-  h_limit_ = z_max_ - params_.flight_clearance;
+  // 넘을 수 있는 장애물 높이 상한: 천장 아래 최대 고도에서 최소 여유를 지킬 수 있어야 한다.
+  // (예전에는 z_max - flight_clearance 로 잡아, 원하는 여유 0.8m 를 다 못 지키는
+  //  0.95~1.55m 장애물은 아예 고도 후보에서 빠졌다)
+  h_limit_ = z_max_ - model_->minFlightClearance();
 
   buildAirLevels();
 
@@ -111,6 +113,12 @@ CostAccumulator ProblemSpec::groundEdge(
   return model_->roverClimbMove(dist, terrain(nx, ny) - terrain(mx, my));
 }
 
+void ProblemSpec::refresh()
+{
+  terrain_->update();
+  buildAirLevels();
+}
+
 void ProblemSpec::buildAirLevels()
 {
   // 맵에 실제로 존재하는 지형 높이만 후보로 삼는다.
@@ -130,10 +138,18 @@ void ProblemSpec::buildAirLevels()
     }
   }
 
+  // 고도 = 장애물 높이 + flight_clearance (원하는 여유).
+  // 천장 때문에 그만큼 못 올라가면 z_max 로 깎되, 최소 여유
+  // (min_flight_clearance) 는 반드시 지킨다 — 못 지키면 후보에서 뺀다.
+  const double q = params_.altitude_resolution;
+  const double min_clr = model_->minFlightClearance();
   std::set<double> levels;
   for (const double h : heights) {
-    const double z = h + params_.flight_clearance;
-    if (z <= z_max_ + 1e-9) {levels.insert(z);}
+    double z = h + params_.flight_clearance;
+    if (q > 0.0) {z = std::ceil(z / q - 1e-6) * q;}
+    z = std::min(z, z_max_);
+    if (z + 1e-9 < h + min_clr) {continue;}
+    levels.insert(std::round(z * 1e6) / 1e6);   // 부동소수 중복 제거
   }
   // 최소 하나는 있어야 이륙이 가능하다 (평지 위 비행)
   if (levels.empty()) {
@@ -153,9 +169,16 @@ bool ProblemSpec::airOkAt(unsigned int mx, unsigned int my, uint8_t level) const
 {
   if (!inBounds(mx, my)) {return false;}
   if (level >= air_levels_.size()) {return false;}
-  const double z = air_levels_[level];
-  const double h = terrain(mx, my);
-  return z >= h + model_->minFlightClearance() - 1e-9 && z <= z_max_ + 1e-9;
+  return altitudeOkOver(air_levels_[level], terrain(mx, my));
+}
+
+bool ProblemSpec::altitudeOkOver(double z, double h) const
+{
+  if (z > z_max_ + 1e-9) {return false;}
+  const double required = std::max(
+    std::min(h + params_.flight_clearance, z_max_),
+    h + model_->minFlightClearance());
+  return z >= required - 1e-9;
 }
 
 bool ProblemSpec::diagOkGround(unsigned int mx, unsigned int my, int dx, int dy) const

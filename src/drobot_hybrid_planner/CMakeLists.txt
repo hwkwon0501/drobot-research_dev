@@ -22,6 +22,7 @@ find_package(std_msgs REQUIRED)
 find_package(pluginlib REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(drobot_msgs REQUIRED)
+find_package(drobot_costmap_2_5d REQUIRED)
 
 set(dependencies
   rclcpp
@@ -35,6 +36,7 @@ set(dependencies
   pluginlib
   tf2_ros
   drobot_msgs
+  drobot_costmap_2_5d
 )
 
 add_library(hybrid_astar_planner SHARED
