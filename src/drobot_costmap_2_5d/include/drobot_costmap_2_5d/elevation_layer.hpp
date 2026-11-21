@@ -63,6 +63,11 @@ struct ElevationCell
   float sum_z2 = 0.0f;   ///< 제곱합 — 분산을 한 번에 구하기 위함
   uint32_t count = 0;
   bool observed = false;
+  /// 포인트클라우드(RGB-D)로 실제 높이를 잰 적이 있는가.
+  /// 2D LiDAR 는 '장애물이 있다'만 알 뿐 높이를 모른다 (rover 경계값을 넣는다).
+  /// 플래너는 이 플래그가 선 셀만 높이를 믿고 날아 넘을 수 있다.
+  bool has_cloud = false;
+  float cloud_max_z = 0.0f;
 
   void add(float z)
   {
@@ -76,6 +81,14 @@ struct ElevationCell
     sum_z += z;
     sum_z2 += z * z;
     ++count;
+  }
+
+  /// 포인트클라우드 관측 — 높이를 실제로 잰 점
+  void addCloud(float z)
+  {
+    add(z);
+    if (!has_cloud || z > cloud_max_z) {cloud_max_z = z;}
+    has_cloud = true;
   }
 
   float mean() const {return count ? sum_z / static_cast<float>(count) : 0.0f;}
@@ -115,6 +128,22 @@ public:
   bool isClearable() override {return true;}
 
   void matchSize() override;
+
+  // ---- 플래너용 조회 ---------------------------------------------------
+  /// 셀별 높이 스냅샷. 플래너가 경로계획 시작 시 한 번 복사해 간다.
+  ///
+  /// master costmap 은 레이어들의 '최댓값'이라 obstacle_layer 의 254 나
+  /// inflation 그라디언트가 높이 등급을 덮어쓴다. 그 값을 높이로 읽으면
+  /// 날아 넘을 수 있는 장애물이 통과 불가가 되므로, 높이는 여기서 직접 읽는다.
+  ///
+  /// height[k] : 포인트클라우드로 잰 최대 높이 (m). 잰 적 없으면 NaN
+  /// cls[k]    : 이 레이어의 분류 결과 (free/rover/fly_over/impassable).
+  ///             관측 없으면 NO_INFORMATION
+  void snapshotTerrain(std::vector<float> & height, std::vector<unsigned char> & cls) const;
+
+  unsigned char costRover() const {return cost_rover_;}
+  unsigned char costImpassable() const {return cost_impassable_;}
+  double roverTraversableMax() const {return rover_traversable_max_;}
 
 private:
   // ---- 콜백 ----------------------------------------------------------
@@ -201,7 +230,7 @@ private:
   std::string global_frame_;
   rclcpp::Logger logger_{rclcpp::get_logger("ElevationLayer")};
   rclcpp::Clock::SharedPtr clock_;
-  std::mutex data_mutex_;
+  mutable std::mutex data_mutex_;
 };
 
 }  // namespace drobot_costmap_2_5d

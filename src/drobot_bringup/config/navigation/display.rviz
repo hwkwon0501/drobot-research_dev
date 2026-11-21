@@ -3,6 +3,10 @@ Panels:
     Name: Displays
   - Class: rviz_common/Views
     Name: Views
+  # 툴바의 'Nav2 Goal'(nav2_rviz_plugins/GoalTool)은 이 패널을 통해 목표를 보낸다.
+  # 패널이 없으면 클릭해도 아무 일도 일어나지 않는다.
+  - Class: nav2_rviz_plugins/Navigation 2
+    Name: Navigation 2
 Visualization Manager:
   Class: ""
   Displays:

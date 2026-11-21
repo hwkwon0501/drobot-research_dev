@@ -9,12 +9,15 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <numeric>
 #include <queue>
 #include <string>
 #include <unordered_map>
 
 #include <nav2_util/node_utils.hpp>
 #include <pluginlib/class_list_macros.hpp>
+
+#include "drobot_hybrid_planner/elevation_terrain_source.hpp"
 
 namespace drobot_hybrid_planner
 {
@@ -117,11 +120,38 @@ void HybridAStarPlanner::configure(
   // 에너지 모델은 energy_model 네임스페이스 아래에서 읽는다
   energy_.configure(node, "energy_model");
 
-  // 지형 소스 — Phase 1 은 costmap cost 값에서 등급을 읽는다 (state_space.hpp 주석 참고)
+  spec_params_.altitude_resolution =
+    getD(node, p + "altitude_resolution", spec_params_.altitude_resolution);
+
+  // 지형 소스.
+  //   1순위: global costmap 의 ElevationLayer 실측 높이 (elevation_terrain_source.hpp 주석 참고)
+  //   없으면: master costmap cost 를 높이 등급으로 읽는다 (정적 맵·벤치마크용).
+  //           fly-over 등급은 실제 높이를 모르므로 상한(fly_over_max)으로 보수적으로 본다.
   CostmapTerrainSource::Config tcfg;
   tcfg.h_rover = spec_params_.rover_max_height;
-  tcfg.h_flyover = getD(node, p + "flyover_representative_height", 0.60);
-  terrain_ = std::make_shared<CostmapTerrainSource>(costmap_, tcfg);
+  tcfg.h_flyover = getD(node, p + "flyover_representative_height", 1.2);
+
+  const std::string elev_name = getS(node, p + "elevation_layer", "elevation_layer");
+  std::shared_ptr<drobot_costmap_2_5d::ElevationLayer> elev;
+  if (auto * plugins = costmap_ros->getLayeredCostmap()->getPlugins()) {
+    for (const auto & layer : *plugins) {
+      if (layer && layer->getName() == elev_name) {
+        elev = std::dynamic_pointer_cast<drobot_costmap_2_5d::ElevationLayer>(layer);
+      }
+    }
+  }
+  if (elev) {
+    terrain_ = std::make_shared<ElevationTerrainSource>(costmap_, elev, tcfg);
+    RCLCPP_INFO(
+      logger_, "지형 소스: ElevationLayer '%s' 실측 높이", elev_name.c_str());
+  } else {
+    terrain_ = std::make_shared<CostmapTerrainSource>(costmap_, tcfg);
+    RCLCPP_WARN(
+      logger_,
+      "ElevationLayer '%s' 를 global costmap 에서 찾지 못했다. cost 값을 높이 등급으로 "
+      "읽는다 (fly-over 등급 = %.2fm 로 간주). obstacle/inflation 레이어 값이 "
+      "높이로 오독될 수 있다.", elev_name.c_str(), tcfg.h_flyover);
+  }
 
   spec_ = std::make_unique<ProblemSpec>(costmap_, terrain_, &energy_, spec_params_);
 
@@ -143,9 +173,9 @@ void HybridAStarPlanner::configure(
   if (spec_->hLimit() <= spec_params_.rover_max_height) {
     RCLCPP_WARN(
       logger_,
-      "천장(%.2fm) 대비 flight_clearance(%.2fm)가 커서 비행으로 넘을 수 있는 "
-      "장애물이 없다. 사실상 지상 전용 플래너가 된다.",
-      spec_params_.ceiling_height, spec_params_.flight_clearance);
+      "천장(%.2fm) 아래 최대 고도에서 최소 여유를 지키면 넘을 수 있는 장애물 높이가 "
+      "%.2fm 이하다. 사실상 지상 전용 플래너가 된다.",
+      spec_params_.ceiling_height, spec_->hLimit());
   }
 }
 
@@ -319,9 +349,7 @@ bool HybridAStarPlanner::segmentOk(const Waypoint & a, const Waypoint & b) const
       if (!spec_->groundOk(mx, my)) {return false;}
     } else {
       const double z = a.z + (b.z - a.z) * t;
-      const double h = spec_->terrain(mx, my);
-      if (z < h + energy_.minFlightClearance() - 1e-9) {return false;}
-      if (z > spec_->zMax() + 1e-9) {return false;}
+      if (!spec_->altitudeOkOver(z, spec_->terrain(mx, my))) {return false;}
     }
   }
   return true;
@@ -581,6 +609,11 @@ nav_msgs::msg::Path HybridAStarPlanner::createPlan(
   // costmap 은 다른 스레드가 갱신하므로 탐색 동안 잠근다
   std::lock_guard<nav2_costmap_2d::Costmap2D::mutex_t> lock(*(costmap_->getMutex()));
 
+  // 지형 높이와 비행 고도 후보를 최신 costmap 으로 갱신한다.
+  // configure 시점의 costmap 은 보통 비어 있어서, 여기서 다시 만들지 않으면
+  // 고도 후보가 평지 위 한 개(flight_clearance)로 굳어 버린다.
+  spec_->refresh();
+
   State s_start, s_goal;
   if (!costmap_->worldToMap(start.pose.position.x, start.pose.position.y,
     s_start.mx, s_start.my))
@@ -640,9 +673,13 @@ nav_msgs::msg::Path HybridAStarPlanner::createPlan(
 
   RCLCPP_INFO(
     logger_,
-    "경로 생성: C=%.4f (E=%.3fWh T=%.1fs 전환=%d) | %zu 노드 확장, %zu 점, %.3fs",
+    "경로 생성: C=%.4f (E=%.3fWh T=%.1fs 전환=%d) | %zu 노드 확장, %zu 점, %.3fs"
+    " | 고도 후보 %zu개, 최고 비행고도 %.2fm",
     final_cost, r.acc.eTotal(), r.acc.time_s, r.acc.nSwitches(),
-    r.n_expanded, wps.size(), elapsed);
+    r.n_expanded, wps.size(), elapsed, spec_->airLevels().size(),
+    std::accumulate(
+      wps.begin(), wps.end(), 0.0,
+      [](double m, const Waypoint & w) {return std::max(m, w.z);}));
 
   // 탐색은 timeout 안에 끝나도 후처리가 늦으면 전체가 제약을 넘는다.
   // 조용히 넘어가면 실시간성 위반을 놓치므로 경고를 남긴다.

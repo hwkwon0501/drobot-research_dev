@@ -56,7 +56,14 @@ planner_server:
 
       # ===== 비행 제약 =====
       # 비행 고도 = 장애물 높이 + flight_clearance
-      flight_clearance: 0.8            # m — 장애물 위 최소 여유
+      flight_clearance: 0.8            # m — 장애물 위 원하는 여유. 천장 때문에 못 지키면
+                                       #     z_max 로 깎되 energy_model.min_flight_clearance 는 지킨다
+      altitude_resolution: 0.1         # m — 비행 고도 후보 양자화 간격 (실측 높이는 연속값)
+      # 지형 높이는 global costmap 의 ElevationLayer 에서 직접 읽는다.
+      # master costmap 의 cost 는 obstacle/inflation 레이어 값이 섞여 높이로 쓸 수 없다.
+      elevation_layer: "elevation_layer"
+      # ElevationLayer 가 없을 때만 쓴다: fly-over 등급 cost 를 이 높이로 간주 (보수적 상한)
+      flyover_representative_height: 1.2
       # 주의: energy_params.yaml 의 ground_effect.activation_height(0.5)보다 크면
       #       ground effect 보정이 영원히 발동하지 않는다. 현재가 그 상태다.
 

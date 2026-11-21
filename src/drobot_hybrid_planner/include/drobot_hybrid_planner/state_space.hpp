@@ -97,6 +97,8 @@ public:
   virtual double heightAt(unsigned int mx, unsigned int my) const = 0;
   /// 로버가 이 셀에 있을 수 있는가
   virtual bool roverTraversable(unsigned int mx, unsigned int my) const = 0;
+  /// 경로계획 시작 시 한 번 호출된다. 센서 기반 소스는 여기서 최신 높이를 받아 온다.
+  virtual void update() {}
 };
 
 /// Costmap2D 의 cost 값을 등급으로 읽어 대표 높이를 돌려주는 구현.
@@ -160,6 +162,9 @@ public:
     bool check_diagonal_corners = true;
     double rover_max_height = 0.15;   ///< 로버 통과 가능 높이 상한
     Modal modal = Modal::Hybrid;      ///< 이동 방식 제한
+    /// 비행 고도 후보의 양자화 간격 (m). 실측 높이는 연속값이라
+    /// 그대로 쓰면 후보가 수백 개가 되어 상태공간이 폭발한다. 0 이하면 양자화 안 함.
+    double altitude_resolution = 0.1;
   };
 
   ProblemSpec(
@@ -167,6 +172,11 @@ public:
     std::shared_ptr<TerrainSource> terrain,
     const EnergyModel * model,
     const Params & params);
+
+  /// 지형 소스를 갱신하고 비행 고도 후보를 다시 만든다.
+  /// 생성 시점(플래너 configure)의 costmap 은 보통 비어 있으므로
+  /// 경로계획마다 호출해야 실제 장애물 높이가 후보에 들어간다.
+  void refresh();
 
   // ---- 상태 유효성 ---------------------------------------------------
   bool inBounds(unsigned int mx, unsigned int my) const;
@@ -198,6 +208,15 @@ public:
   /// 고정 고도 level 로 이 셀 위를 날 수 있는가.
   /// 지형 위 최소 여유를 지키고 천장 아래여야 한다.
   bool airOkAt(unsigned int mx, unsigned int my, uint8_t level) const;
+
+  /// 지형 높이 h 위를 고도 z 로 날아도 되는가.
+  ///
+  /// 원하는 여유는 flight_clearance 다. 천장(z_max) 때문에 그만큼 못 올라가는
+  /// 장애물만 예외로, z_max 까지 올라가되 min_flight_clearance 는 지켜야 한다.
+  /// (예전에는 min_flight_clearance 만 봤다. 그래서 고도 후보 중 가장 낮은
+  ///  0.8m 가 0.6m 로 간주된 장애물 위에서 통과되어, 실제로 1.0m 인 박스를
+  ///  0.8m 로 뚫고 지나가는 경로가 나왔다)
+  bool altitudeOkOver(double z, double h) const;
 
   /// 대각선 이동에서 모서리를 뚫고 지나가지 않는가.
   ///
